@@ -2,18 +2,25 @@
 
 import "regenerator-runtime/runtime";
 
-import { css } from "emotion";
+import { css, keyframes } from "emotion";
 import debounce from "lodash.debounce";
 import React from "react";
-import { prettySize } from "./Utils";
+import {
+  SandpackConsumer,
+  SandpackProvider,
+} from "react-smooshpack/es/components";
+import semver from "semver";
+
+import { getCodeSize, getEnvPresetOptions } from "./Utils";
 import ErrorBoundary from "./ErrorBoundary";
-import CodeMirrorPanel from "./CodeMirrorPanel";
+import { loadBuildArtifacts, loadLatestBuildNumberForBranch } from "./CircleCI";
+import ReplEditor from "./ReplEditor";
+import ReplLoader from "./ReplLoader";
 import ReplOptions from "./ReplOptions";
 import StorageService from "./StorageService";
 import UriUtils from "./UriUtils";
-import loadBundle from "./loadBundle";
-import loadPlugin from "./loadPlugin";
-import PresetLoadingAnimation from "./PresetLoadingAnimation";
+import loadBuild from "./loadBuild";
+
 import {
   babelConfig,
   envPresetConfig,
@@ -31,7 +38,6 @@ import {
   persistedStateToEnvConfig,
   persistedStateToShippedProposalsState,
 } from "./replUtils";
-import WorkerApi from "./WorkerApi";
 import scopedEval from "./scopedEval";
 import { colors, media } from "./styles";
 
@@ -44,54 +50,39 @@ import type {
   PluginState,
   PluginStateMap,
   SourceType,
+  SandpackConsumerProps,
+  SandpackStatus,
 } from "./types";
 
 type Props = {};
 type State = {
   babel: BabelState,
   code: string,
-  compiled: ?string,
-  compileErrorMessage: ?string,
+  config: {
+    error: ?string,
+    ready: boolean,
+    transpilerUrl: ?string,
+    buildArtifacts: Object,
+  },
   debugEnvPreset: boolean,
   envConfig: EnvConfig,
   envPresetDebugInfo: ?string,
   envPresetState: EnvState,
   shippedProposalsState: ShippedProposalsState,
+  evalEnabled: boolean,
   evalErrorMessage: ?string,
   fileSize: boolean,
   sourceType: SourceType,
   isSidebarExpanded: boolean,
   lineWrap: boolean,
-  meta: Object,
   plugins: PluginStateMap,
-  presets: PluginStateMap,
-  runtimePolyfillState: PluginState,
+  presets: Array<string>,
   sourceMap: ?string,
-  externalPlugins: Array<string>,
-  pluginSearch: ?string,
-  showOfficialExternalPlugins: boolean,
-  loadingExternalPlugins: boolean,
+  userPlugins: { [name: string]: string },
 };
-
-const DEBOUNCE_DELAY = 500;
-
-function toCamelCase(str) {
-  return str
-    .replace(/-/g, " ")
-    .replace(/\//g, "_")
-    .replace(/@/g, "_")
-    .replace(/\s(.)/g, function($1) {
-      return $1.toUpperCase();
-    })
-    .replace(/\s/g, "")
-    .replace(/^(.)/, function($1) {
-      return $1.toLowerCase();
-    });
-}
 
 class Repl extends React.Component<Props, State> {
   _numLoadingPlugins = 0;
-  _workerApi = new WorkerApi();
 
   constructor(props: Props, context: any) {
     super(props, context);
@@ -102,27 +93,25 @@ class Repl extends React.Component<Props, State> {
       prettier: persistedState.prettier,
     };
 
-    const presets = persistedState.presets
+    const persistedPresets = persistedState.presets
       ? persistedState.presets.split(",")
       : [];
 
-    const defaultPresets = presets.reduce((reduced, key) => {
-      if (key) reduced[key] = true;
-      return reduced;
-    }, {});
+    // TODO: temporary
+    const presets = persistedPresets.filter(p => p && p !== "env");
 
     const envConfig = persistedStateToEnvConfig(persistedState);
-    // const isPresetsTabExpanded = !!presets.filter(preset => preset !== "env")
-    //   .length;
 
-    // A partial State is defined first b'c this._compile needs it.
-    // The compile helper will then populate the missing State values.
+    // TODO: cleanup/move to unstated
     this.state = {
       babel: persistedStateToBabelState(persistedState, babelConfig),
       code: persistedState.code,
-      compiled: null,
-      pluginSearch: "",
-      compileErrorMessage: null,
+      config: {
+        buildArtifacts: {},
+        ready: false,
+        transpilerUrl: undefined,
+        error: null,
+      },
       debugEnvPreset: persistedState.debug,
       envConfig,
       envPresetDebugInfo: null,
@@ -131,343 +120,109 @@ class Repl extends React.Component<Props, State> {
         envPresetConfig,
         envConfig.isEnvPresetEnabled
       ),
-      shippedProposalsState: persistedStateToShippedProposalsState(
-        persistedState,
-        shippedProposalsConfig,
-        envConfig.isEnvPresetEnabled && envConfig.shippedProposals
-      ),
+      evalEnabled: false,
       evalErrorMessage: null,
       fileSize: persistedState.fileSize,
       sourceType: persistedState.sourceType,
       isSidebarExpanded: persistedState.showSidebar,
       lineWrap: persistedState.lineWrap,
-      meta: {
-        compiledSize: 0,
-        rawSize: 0,
-      },
       plugins: configArrayToStateMap(pluginConfigs, defaultPlugins),
-      // Filled in after Babel is loaded
-      presets: {},
-      runtimePolyfillState: configToState(
-        runtimePolyfillConfig,
-        persistedState.evaluate
+      presets,
+      shippedProposalsState: persistedStateToShippedProposalsState(
+        persistedState,
+        shippedProposalsConfig,
+        envConfig.isEnvPresetEnabled && envConfig.shippedProposals
       ),
       sourceMap: null,
-      showOfficialExternalPlugins: false,
-      externalPlugins: [],
       loadingExternalPlugins: false,
+      userPlugins: {},
     };
-
-    this._setupBabel(defaultPresets);
   }
 
-  render() {
+  componentDidMount() {
+    this.setupBabel();
+  }
+
+  handleUserPluginChange = userPlugins => {
+    this.setState({ userPlugins });
+  };
+
+  renderOptions = ({ availablePresets }) => {
     const state = this.state;
 
-    if (!state.babel.isLoaded) {
-      let message = "Loading Babel...";
-
-      if (state.babel.didError) {
-        message =
-          state.babel.errorMessage ||
-          "An error occurred while loading Babel :(";
-      }
-
-      return (
-        <div className={styles.loader}>
-          <div className={styles.loaderContent}>
-            {message}
-            {state.babel.isLoading && (
-              <PresetLoadingAnimation className={styles.loadingAnimation} />
-            )}
-          </div>
-        </div>
-      );
-    }
-
-    const options = {
-      fileSize: state.fileSize,
-      lineWrapping: state.lineWrap,
-    };
+    // TODO(bng): this is super temporary... we need to generally clean up
+    // all the preset/plugin state stuff, as the order of operations has
+    // changed from being:
+    //
+    // props -> load babel -> get context -> convert to state -> compile
+    //
+    // to:
+    //
+    // props -> sandpack compiles -> get babel context -> deal with result
+    const presets = configArrayToStateMap(
+      availablePresets,
+      state.presets.reduce((result, p) => {
+        result[p] = true;
+        return result;
+      }, {})
+    );
 
     return (
-      <div className={styles.repl}>
-        <ReplOptions
-          babelVersion={state.babel.version}
-          className={styles.optionsColumn}
-          debugEnvPreset={state.debugEnvPreset}
-          envConfig={state.envConfig}
-          envPresetState={state.envPresetState}
-          shippedProposalsState={state.shippedProposalsState}
-          fileSize={state.fileSize}
-          sourceType={state.sourceType}
-          isExpanded={state.isSidebarExpanded}
-          lineWrap={state.lineWrap}
-          onEnvPresetSettingChange={this._onEnvPresetSettingChange}
-          onExternalPluginRemove={this.handleRemoveExternalPlugin}
-          onIsExpandedChange={this._onIsSidebarExpandedChange}
-          onSettingChange={this._onSettingChange}
-          pluginState={state.plugins}
-          presetState={state.presets}
-          runtimePolyfillConfig={runtimePolyfillConfig}
-          runtimePolyfillState={state.runtimePolyfillState}
-          externalPlugins={state.externalPlugins}
-          pluginsLoading={true}
-          pluginChange={this._pluginChange}
-          pluginSearch={this._pluginSearch}
-          pluginValue={state.pluginSearch}
-          showOfficialExternalPluginsChanged={
-            this._showOfficialExternalPluginsChanged
-          }
-          showOfficialExternalPlugins={state.showOfficialExternalPlugins}
-          loadingExternalPlugins={state.loadingExternalPlugins}
-        />
+      <ReplOptions
+        className={styles.optionsColumn}
+        debugEnvPreset={state.debugEnvPreset}
+        envConfig={state.envConfig}
+        envPresetState={state.envPresetState}
+        evalEnabled={state.evalEnabled}
+        shippedProposalsState={state.shippedProposalsState}
+        fileSize={state.fileSize}
+        isExpanded={state.isSidebarExpanded}
+        lineWrap={state.lineWrap}
+        onEnvPresetSettingChange={this._onEnvPresetSettingChange}
+        onIsExpandedChange={this._onIsSidebarExpandedChange}
+        onSettingChange={this._onSettingChange}
+        onExternalPluginRemove={this.handleRemoveExternalPlugin}
+        onUserPluginChange={this.handleUserPluginChange}
+        pluginState={state.plugins}
+        presetState={presets}
+        userPlugins={state.userPlugins}
+      />
+    );
+  };
 
-        <div className={styles.panels}>
-          <CodeMirrorPanel
-            className={styles.codeMirrorPanel}
-            code={state.code}
-            errorMessage={state.compileErrorMessage}
-            fileSize={state.meta.rawSize}
-            onChange={this._updateCode}
-            options={options}
-            placeholder="Write code here"
-          />
-          <CodeMirrorPanel
-            className={styles.codeMirrorPanel}
-            code={state.compiled}
-            errorMessage={state.evalErrorMessage}
-            fileSize={state.meta.compiledSize}
-            info={state.debugEnvPreset ? state.envPresetDebugInfo : null}
-            options={options}
-            placeholder="Compiled output will be shown here"
-          />
-        </div>
-      </div>
+  render() {
+    const { code, config, evalEnabled, fileSize, lineWrap } = this.state;
+
+    if (!config.ready) {
+      const message = config.error || "Initializing...";
+      return <ReplLoader isLoading={false} message={message} />;
+    }
+
+    const { files, dependencies } = this.mapStateToConfigs();
+
+    return (
+      <SandpackProvider
+        files={files}
+        className={styles.repl}
+        dependencies={dependencies}
+        entry="/index.js"
+        skipEval={!evalEnabled}
+      >
+        <SandpackConsumer>
+          {(sandpackProps: SandpackConsumerProps) => (
+            <ReplEditor
+              {...sandpackProps}
+              code={code}
+              lineWrap={lineWrap}
+              onCodeChange={this._updateCode}
+              renderSidebar={this.renderOptions}
+              showFileSize={fileSize}
+            />
+          )}
+        </SandpackConsumer>
+      </SandpackProvider>
     );
   }
-
-  async _setupBabel(defaultPresets) {
-    const babelState = await loadBundle(this.state.babel, this._workerApi);
-    const { envPresetState } = this.state;
-
-    this.setState({
-      babel: babelState,
-      presets: configArrayToStateMap(
-        babelState.availablePresets,
-        defaultPresets
-      ),
-    });
-    if (babelState.isLoaded) {
-      if (!envPresetState.isLoading) {
-        return this._compile(this.state.code, this._checkForUnloadedPlugins);
-      }
-      this._checkForUnloadedPlugins();
-    }
-  }
-
-  async _checkForUnloadedPlugins() {
-    const {
-      envConfig,
-      envPresetState,
-      shippedProposalsState,
-      plugins,
-      runtimePolyfillState,
-    } = this.state;
-    // Assume all default presets are baked into babel-standalone.
-    // We really only need to worry about plugins.
-    for (const key in plugins) {
-      const plugin = plugins[key];
-
-      if (plugin.isEnabled && !plugin.isLoaded && !plugin.isLoading) {
-        this._numLoadingPlugins++;
-        this._workerApi.loadPlugin(plugin).then(success => {
-          this._numLoadingPlugins--;
-
-          // If a plugin has failed to load, re-render to show a loading error.
-          if (!success) {
-            this.setState({ plugins });
-          }
-
-          // Once all plugins have been loaded, re-compile code.
-          if (this._numLoadingPlugins === 0) {
-            this._updateCode(this.state.code);
-          }
-        });
-      }
-    }
-
-    // Babel (runtime) polyfill is large;
-    // It's only needed if we're actually executing the compiled code.
-    // Defer loading it unless "evaluate" is enabled.
-    if (runtimePolyfillState.isEnabled && !runtimePolyfillState.isLoaded) {
-      // Compilation is done in a web worker for performance reasons,
-      // But eval requires the UI thread so code can access globals like window.
-      // Because of this, the runtime polyfill must be loaded on the UI thread.
-      // We also eval in an iframe so the polyfills need to be accessible there.
-      // We could copy them from window to frame.contentWindow,
-      // But it's less error-prone to just load the polyfills into the iframe.
-      loadPlugin(
-        runtimePolyfillState,
-        () => {
-          let evalErrorMessage: ?string = null;
-
-          if (!this.state.compiled) {
-            return;
-          }
-
-          // No need to recompile at this point;
-          // Just evaluate the most recently compiled code.
-          try {
-            // eslint-disable-next-line
-            scopedEval.execute(this.state.compiled, this.state.sourceMap);
-          } catch (error) {
-            evalErrorMessage = error.message;
-          }
-
-          // Re-render (even if no error) to update the label loading-state.
-          this.setState({ evalErrorMessage });
-        },
-        scopedEval.getIframe()
-      );
-    }
-
-    // Babel 'env' preset is large;
-    // Only load it if it's been requested.
-    if (envConfig.isEnvPresetEnabled && !envPresetState.isLoaded) {
-      envPresetState.isLoading = true;
-      loadBundle(envPresetState, this._workerApi).then(() => {
-        // This preset is not built into Babel standalone due to its size.
-        // Before we can use it we need to explicitly register it.
-        // Because it's loaded in a worker, we need to configure it there as well.
-        this._workerApi
-          .registerEnvPreset()
-          .then(() => this._updateCode(this.state.code));
-      });
-    }
-    if (
-      envConfig.isEnvPresetEnabled &&
-      envConfig.shippedProposals &&
-      !shippedProposalsState.isLoaded
-    ) {
-      const availablePlugins = await this._workerApi.getAvailablePlugins();
-      const availablePluginsNames = availablePlugins.map(({ label }) => label);
-      const notRegisteredPackages = shippedProposalsState.config.packages
-        .filter(
-          packageState => !availablePluginsNames.includes(packageState.label)
-        )
-        .map(config =>
-          configToState({ ...config, version: this.state.babel.version }, true)
-        );
-
-      if (notRegisteredPackages.length) {
-        shippedProposalsState.isLoading = true;
-        const plugins = await Promise.all(
-          notRegisteredPackages.map(state => loadBundle(state, this._workerApi))
-        );
-        const allPluginsAreLoaded = plugins.every(({ isLoaded }) => isLoaded);
-        if (allPluginsAreLoaded) {
-          await this._workerApi.registerPlugins(
-            plugins.map(({ config }) => ({
-              instanceName: config.instanceName,
-              pluginName: config.label,
-            }))
-          );
-          shippedProposalsState.isLoaded = true;
-          this._updateCode(this.state.code);
-        } else {
-          shippedProposalsState.didError = true;
-        }
-        shippedProposalsState.isLoading = false;
-      }
-    }
-  }
-  _pluginSearch = value =>
-    this.setState({
-      pluginSearch: value,
-    });
-
-  _pluginChange = plugin => {
-    const pluginExists = this.state.externalPlugins.includes(plugin.name);
-
-    this.setState({ loadingExternalPlugins: true });
-
-    const bundledUrl = `https://bundle.run/${plugin.name}@${plugin.version}`;
-
-    this._workerApi.loadExternalPlugin(bundledUrl).then(loaded => {
-      if (loaded === false) {
-        this.setState({
-          compileErrorMessage: `Plugin ${plugin.name} could not be loaded`,
-          loadingExternalPlugins: false,
-        });
-        return;
-      }
-
-      this._workerApi
-        .registerPlugins([
-          {
-            instanceName: toCamelCase(plugin.name),
-            pluginName: plugin.name,
-          },
-        ])
-        .then(() => {
-          this.setState({ loadingExternalPlugins: false });
-        });
-
-      if (!pluginExists) {
-        this.setState(
-          state => ({
-            externalPlugins: [...state.externalPlugins, plugin.name],
-          }),
-          this._pluginsUpdatedSetStateCallback
-        );
-      } else {
-        this.handleRemoveExternalPlugin(plugin.name);
-      }
-    });
-  };
-
-  _showOfficialExternalPluginsChanged = () =>
-    this.setState(state => ({
-      showOfficialExternalPlugins: !state.showOfficialExternalPlugins,
-    }));
-
-  _compile = (code: string, setStateCallback: () => mixed) => {
-    const { state } = this;
-    const { runtimePolyfillState } = state;
-
-    const presetsArray = this._presetsToArray(state);
-
-    const babili = state.plugins["babili-standalone"];
-    if (babili.isEnabled && babili.isLoaded) {
-      presetsArray.push("babili");
-    }
-    this._workerApi
-      .compile(code, {
-        plugins: state.externalPlugins,
-        debugEnvPreset: state.debugEnvPreset,
-        envConfig: state.envPresetState.isLoaded ? state.envConfig : null,
-        evaluate:
-          runtimePolyfillState.isEnabled && runtimePolyfillState.isLoaded,
-        presets: presetsArray,
-        prettify: state.plugins.prettier.isEnabled,
-        sourceMap: runtimePolyfillState.isEnabled,
-        sourceType: state.sourceType,
-      })
-      .then(result => {
-        result.meta.compiledSize = prettySize(result.meta.compiledSize);
-        result.meta.rawSize = prettySize(result.meta.rawSize);
-        this.setState(result, setStateCallback);
-      });
-  };
-
-  // Debounce compilation since it's expensive.
-  // This also avoids prematurely warning the user about invalid syntax,
-  // eg when in the middle of typing a variable name.
-  _compileToState = debounce(
-    (code: string) => this._compile(code, this._persistState),
-    DEBOUNCE_DELAY
-  );
 
   _onEnvPresetSettingChange = (name: string, value: any) => {
     this.setState(
@@ -490,15 +245,13 @@ class Repl extends React.Component<Props, State> {
     );
   };
 
-  _onSettingChange = (name: string, value: boolean | string) => {
+  _onSettingChange = (name: string, value: any) => {
     this.setState(state => {
-      const { plugins, presets, runtimePolyfillState } = state;
+      const { plugins, presets } = state;
 
-      if (name === "babel-polyfill") {
-        runtimePolyfillState.isEnabled = !!value;
-
+      if (name === "presets") {
         return {
-          runtimePolyfillState,
+          presets: value,
         };
       } else if (state.hasOwnProperty(name)) {
         return {
@@ -506,15 +259,8 @@ class Repl extends React.Component<Props, State> {
         };
       } else if (plugins.hasOwnProperty(name)) {
         plugins[name].isEnabled = !!value;
-
         return {
           plugins,
-        };
-      } else if (presets.hasOwnProperty(name)) {
-        presets[name].isEnabled = !!value;
-
-        return {
-          presets,
         };
       }
     }, this._pluginsUpdatedSetStateCallback);
@@ -524,7 +270,7 @@ class Repl extends React.Component<Props, State> {
     const { state } = this;
     const { envConfig, plugins } = state;
 
-    const presetsArray = this._presetsToArray();
+    const presetsArray = this.state.presets.slice();
 
     const babili = state.plugins["babili-standalone"];
     if (babili.isEnabled) {
@@ -549,7 +295,7 @@ class Repl extends React.Component<Props, State> {
       debug: state.debugEnvPreset,
       forceAllTransforms: envConfig.forceAllTransforms,
       shippedProposals: envConfig.shippedProposals,
-      evaluate: state.runtimePolyfillState.isEnabled,
+      evaluate: state.evalEnabled,
       fileSize: state.fileSize,
       sourceType: state.sourceType,
       lineWrap: state.lineWrap,
@@ -565,24 +311,143 @@ class Repl extends React.Component<Props, State> {
   };
 
   _pluginsUpdatedSetStateCallback = () => {
-    this._checkForUnloadedPlugins();
     this._updateCode(this.state.code);
   };
 
-  _presetsToArray(state: State = this.state): BabelPresets {
-    const { presets } = state;
+  mapStateToConfigs() {
+    const {
+      code,
+      config,
+      envConfig,
+      envPresetState,
+      evalEnabled,
+      presets: requestedPresets,
+      userPlugins,
+    } = this.state;
 
-    return Object.keys(presets)
-      .filter(key => presets[key].isEnabled && presets[key].isLoaded)
-      .map(key => presets[key].config.label);
+    const useScoped = true;
+
+    const packageDeps = {};
+    console.log(envConfig, envPresetState);
+    // To simplify things, if `build` is passed, then we assume scoped packages,
+    // as the main use-case for this is for allowing the REPL to test PRs.
+
+    // TODO: handle parsing version from query string
+    // if (babel.version) {}
+
+    const getConfigNameFromKey = (key, scopeNeeded) => {
+      return scopeNeeded ? `@babel/preset-${key}` : key;
+    };
+
+    const getPackageNameFromKey = (key, scopeNeeded) => {
+      return scopeNeeded ? `@babel/preset-${key}` : `babel-preset-${key}`;
+    };
+
+    // TODO: handle 3rd party presets?
+    const plugins = [];
+    const presets = requestedPresets.slice();
+
+    if (envConfig.isEnvPresetEnabled) {
+      presets.push(getConfigNameFromKey("env", useScoped));
+
+      Object.keys(getEnvPresetOptions(envConfig))
+        .map(getConfigNameFromKey)
+        .forEach(configName => presets.push(configName));
+
+      // if (!envConfig.build) {}
+
+      // let packageVersion = "*";
+
+      // const requestedEnvVersion = envPresetState.version;
+      // if (envPresetState.build) {
+      //   packageVersion = "*";
+      // } if (requestedEnvVersion) {
+      //   packageVersion = requestedEnvVersion;
+      // } else if (useScoped) {
+      //   packageVersion = version;
+      // } else if (semver.satisfies(version, "^6")) {
+      //   packageVersion = "1.6.1";
+      // }
+
+      // packageDeps[getPackageNameFromKey("env", useScoped)] = packageVersion;
+    }
+
+    Object.keys(userPlugins).forEach(plugin => {
+      plugins.push(plugin);
+      packageDeps[plugin] = userPlugins[plugin];
+    });
+
+    const files = {};
+
+    files["/.babelrc"] = {
+      code: JSON.stringify(
+        {
+          // TODO: handle state.externalPlugins
+          plugins,
+          presets,
+          sourceMaps: evalEnabled,
+        },
+        null,
+        2
+      ),
+    };
+
+    files["/index.js"] = {
+      code,
+    };
+
+    if (config.buildArtifacts) {
+      const items = {
+        babelURL: config.buildArtifacts.babelStandalone,
+      };
+
+      if (envConfig.isEnvPresetEnabled) {
+        items.babelEnvURL = config.buildArtifacts.envStandalone;
+      }
+
+      files["/babel-transpiler.json"] = {
+        code: JSON.stringify(items, null, 2),
+      };
+    }
+
+    return {
+      dependencies: packageDeps,
+      files,
+    };
+  }
+
+  // If we're loading a specific build/version of Babel, like from a
+  // CircleCI artifact, then we need to generate a config file to let
+  // Sandpack know to use it instead of its default.
+  async setupBabel() {
+    let buildArtifacts;
+
+    try {
+      buildArtifacts = await loadBuild(
+        this.state.babel.build,
+        this.state.babel.circleciRepo
+      );
+    } catch (ex) {
+      this.setState({
+        config: {
+          error: ex.message,
+        },
+      });
+
+      return;
+    }
+
+    this.setState({
+      config: {
+        ...this.state.config,
+        buildArtifacts,
+        ready: true,
+      },
+    });
   }
 
   _updateCode = (code: string) => {
-    this.setState({ code });
-
-    // Update state with compiled code, errors, etc after a small delay.
-    // This prevents frequent updates while a user is typing.
-    this._compileToState(code);
+    this.setState({ code }, this._persistState);
   };
 
   handleRemoveExternalPlugin = (pluginName: string) => {

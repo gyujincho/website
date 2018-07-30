@@ -43,32 +43,31 @@ type PluginSearch = (value: string) => void;
 type PluginChange = (plugin: Object) => void;
 
 type Props = {
-  babelVersion: ?string,
   className: string,
   debugEnvPreset: boolean,
-  pluginsLoading: boolean,
-  pluginValue: ?string,
-  showOfficialExternalPlugins: boolean,
-  pluginChange: PluginChange,
-  externalPlugins: Array<string>,
-  showOfficialExternalPluginsChanged: ShowOfficialExternalPluginsChanged,
   envConfig: EnvConfig,
-  pluginSearch: PluginSearch,
   envPresetState: EnvState,
-  shippedProposalsState: ShippedProposalsState,
+  externalPlugins: Array<string>,
+  evalEnabled: boolean,
   fileSize: boolean,
-  sourceType: SourceType,
   isExpanded: boolean,
   lineWrap: boolean,
   onEnvPresetSettingChange: ToggleEnvPresetSetting,
   onExternalPluginRemove: (pluginName: string) => void,
   onIsExpandedChange: ToggleExpanded,
+  onUserPluginChange: any,
   onSettingChange: ToggleSetting,
+  pluginChange: PluginChange,
+  pluginsLoading: boolean,
+  pluginSearch: PluginSearch,
   pluginState: PluginStateMap,
+  pluginValue: ?string,
   presetState: PluginStateMap,
-  runtimePolyfillConfig: PluginConfig,
-  runtimePolyfillState: PluginState,
-  loadingExternalPlugins: boolean,
+  shippedProposalsState: ShippedProposalsState,
+  showOfficialExternalPlugins: boolean,
+  showOfficialExternalPluginsChanged: ShowOfficialExternalPluginsChanged,
+  sourceType: SourceType,
+  userPlugins: any,
 };
 
 type LinkProps = {
@@ -119,13 +118,32 @@ class ExpandedContainer extends Component<Props, State> {
 
     this.state = {
       isEnvTabExpanded: props.envConfig.isEnvPresetEnabled,
-      isPluginsTabExpanded: props.externalPlugins.length > 0,
+      isPluginsTabExpanded: Object.keys(props.userPlugins).length > 0,
       isPresetsTabExpanded: Object.keys(props.presetState).some(
         p => props.presetState[p].isEnabled
       ),
       isSettingsTabExpanded: true, // TODO
     };
   }
+
+  handlePresetChange = (name: string, isEnabled: boolean) => {
+    const { onSettingChange, presetState } = this.props;
+
+    onSettingChange(
+      "presets",
+      Object.keys(presetState).reduce((result, key) => {
+        if (
+          presetState[key] &&
+          ((key !== name && presetState[key].isEnabled) ||
+            (key === name && isEnabled))
+        ) {
+          result.push(key);
+        }
+
+        return result;
+      }, [])
+    );
+  };
 
   handleToggleTabExpanded = (tab: SidebarTabSection) => {
     const parsedTab = tab.charAt(0).toUpperCase() + tab.slice(1);
@@ -138,25 +156,24 @@ class ExpandedContainer extends Component<Props, State> {
 
   render() {
     const {
-      babelVersion,
       debugEnvPreset,
       envConfig,
       envPresetState,
+      evalEnabled,
       shippedProposalsState,
       fileSize,
       sourceType,
       lineWrap,
-      onIsExpandedChange,
       onExternalPluginRemove,
+      onIsExpandedChange,
       onSettingChange,
+      onUserPluginChange,
       pluginState,
       presetState,
-      runtimePolyfillConfig,
-      runtimePolyfillState,
       pluginsLoading,
       pluginValue,
       showOfficialExternalPlugins,
-      loadingExternalPlugins,
+      userPlugins,
     } = this.props;
 
     const {
@@ -181,12 +198,15 @@ class ExpandedContainer extends Component<Props, State> {
             onToggleExpanded={this.handleToggleTabExpanded}
             tabKey="settings"
           >
-            <PluginToggle
-              config={runtimePolyfillConfig}
-              label="Evaluate"
-              onSettingChange={onSettingChange}
-              state={runtimePolyfillState}
-            />
+            <label className={styles.settingsLabel}>
+              <input
+                checked={evalEnabled}
+                onChange={this._onSettingCheck("evalEnabled")}
+                className={styles.inputCheckboxLeft}
+                type="checkbox"
+              />
+              Evaluate
+            </label>
             <label className={styles.settingsLabel}>
               <input
                 checked={lineWrap}
@@ -243,7 +263,7 @@ class ExpandedContainer extends Component<Props, State> {
                 <PluginToggle
                   config={state.config}
                   key={preset}
-                  onSettingChange={onSettingChange}
+                  onSettingChange={this.handlePresetChange}
                   state={state}
                 />
               );
@@ -270,12 +290,7 @@ class ExpandedContainer extends Component<Props, State> {
                 type="checkbox"
                 onChange={this._onEnvPresetSettingCheck("isEnvPresetEnabled")}
               />
-
-              {envPresetState.isLoading ? (
-                <PresetLoadingAnimation />
-              ) : (
-                "Enabled"
-              )}
+              Enabled
             </label>
 
             <div className={styles.envPresetColumn}>
@@ -303,9 +318,7 @@ class ExpandedContainer extends Component<Props, State> {
               <input
                 className={`${styles.envPresetNumber} ${styles.envPresetInput}`}
                 disabled={
-                  !envPresetState.isLoaded ||
-                  !envConfig.isEnvPresetEnabled ||
-                  !envConfig.isElectronEnabled
+                  !envConfig.isEnvPresetEnabled || !envConfig.isElectronEnabled
                 }
                 type="number"
                 min={envPresetDefaults.electron.min}
@@ -366,8 +379,7 @@ class ExpandedContainer extends Component<Props, State> {
                   disabled={
                     !envPresetState.isLoaded ||
                     !envConfig.isEnvPresetEnabled ||
-                    !envConfig.isBuiltInsEnabled ||
-                    runtimePolyfillState.isEnabled
+                    !envConfig.isBuiltInsEnabled
                   }
                 >
                   <option value="entry">Entry</option>
@@ -458,9 +470,6 @@ class ExpandedContainer extends Component<Props, State> {
                 <input
                   checked={debugEnvPreset}
                   className={styles.inputCheckboxLeft}
-                  disabled={
-                    disableEnvSettings || runtimePolyfillState.isEnabled
-                  }
                   onChange={this._onSettingCheck("debugEnvPreset")}
                   type="checkbox"
                 />
@@ -470,27 +479,13 @@ class ExpandedContainer extends Component<Props, State> {
           </AccordionTab>
 
           <ExternalPlugins
-            _pluginNameChanged={this._pluginNameChanged}
-            _onshowOfficialExternalPluginsChanged={
-              this._onshowOfficialExternalPluginsChanged
-            }
-            _pluginChanged={this.props.pluginChange}
             isExpanded={isPluginsTabExpanded}
-            isLoading={loadingExternalPlugins}
-            onRemove={onExternalPluginRemove}
+            onSelect={onUserPluginChange}
             onToggleExpanded={this.handleToggleTabExpanded}
-            pluginValue={pluginValue}
-            plugins={this.props.externalPlugins}
-            pluginsLoading={pluginsLoading}
-            showOfficialExternalPlugins={showOfficialExternalPlugins}
             styles={styles}
+            userPlugins={userPlugins}
           />
         </div>
-        {babelVersion && (
-          <div className={styles.versionRow} title={`v${babelVersion}`}>
-            v{babelVersion}
-          </div>
-        )}
         <div
           className={`${styles.closeButton} ${nestedCloseButton}`}
           onClick={() => onIsExpandedChange(false)}
@@ -518,22 +513,6 @@ class ExpandedContainer extends Component<Props, State> {
 
   _onSettingCheck = (type: string) => (event: SyntheticInputEvent<*>) => {
     this.props.onSettingChange(type, event.target.checked);
-  };
-
-  _pluginNameChanged = value => {
-    this.props.pluginSearch(value);
-  };
-
-  _onshowOfficialExternalPluginsChanged = value => {
-    this.props.showOfficialExternalPluginsChanged(value);
-  };
-
-  _pluginChanged = (e, plugin) => {
-    const on = e.target.value === "on";
-    const externalPlugins = this.props.externalPlugins;
-    if (!externalPlugins[plugin.name] && on) {
-      this.props.pluginChange(plugin);
-    }
   };
 }
 

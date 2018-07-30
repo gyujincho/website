@@ -19,21 +19,41 @@ async function sendRequest(repo: ?string, uri: string): Promise<Object> {
   return response;
 }
 
+type BuildArtifacts =
+  | {
+      babelStandalone: string,
+      envStandalone: string,
+    }
+  | typeof undefined;
+
 export async function loadBuildArtifacts(
   repo: ?string,
-  regExp: RegExp,
   build: number,
-  cb: (url: string, error?: string) => Promise<any> // eslint-disable-line no-unused-vars
-): Promise<string> {
+  cb?: (url: string, error?: string) => Promise<any> // eslint-disable-line no-unused-vars
+): Promise<BuildArtifacts> {
   try {
     const response = await sendRequest(repo, `${build}/artifacts`);
-    const artifacts = response.filter(x => regExp.test(x.path));
-    if (!artifacts || artifacts.length === 0) {
+
+    const result = {
+      babelStandalone: null,
+      envStandalone: null,
+    };
+
+    response.forEach(x => {
+      if (x.path.indexOf("babel-standalone/babel.js") > -1) {
+        result.babelStandalone = x.url;
+      } else if (
+        x.path.indexOf("babel-preset-env-standalone/babel-preset-env.js") > -1
+      ) {
+        result.envStandalone = x.url;
+      }
+    });
+
+    if (!result.babelStandalone) {
       throw new Error(
         `Could not find valid babel-standalone artifact in build #${build}`
       );
     }
-    return artifacts[0].url;
   } catch (ex) {
     throw new Error(`Could not load Babel build #${build}: ${ex.message}`);
   }
@@ -54,7 +74,7 @@ export async function loadLatestBuildNumberForBranch(
     return response[0].build_num;
   } catch (ex) {
     throw new Error(
-      `Could not load latest Babel build on ${branch}: ${ex.message}`
+      `Could not load latest Babel build on branch "${branch}": ${ex.message}`
     );
   }
 }

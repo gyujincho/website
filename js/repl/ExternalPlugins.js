@@ -8,11 +8,12 @@ import PresetLoadingAnimation from "./PresetLoadingAnimation";
 import type { SidebarTabSection } from "./types";
 
 type Props = {
-  _pluginChanged: any,
   isExpanded: boolean,
   isLoading: boolean,
   onRemove: (pluginName: string) => void,
   onToggleExpanded: (key: SidebarTabSection) => mixed,
+  onSelect: any,
+  userPlugins: any,
   plugins: Array<string>,
   styles: Object,
 };
@@ -39,6 +40,13 @@ export default class ExternalPlugins extends React.Component<Props, State> {
     this.setState({ modalOpen: false });
   };
 
+  handlePluginSelect = (hit: any) => {
+    this.props.onSelect({
+      ...this.props.userPlugins,
+      [hit.name]: hit.version,
+    });
+  };
+
   renderButton() {
     const { isLoading } = this.props;
 
@@ -54,12 +62,12 @@ export default class ExternalPlugins extends React.Component<Props, State> {
   }
 
   renderPlugins() {
-    const { onRemove, plugins } = this.props;
+    const plugins = Object.keys(this.props.userPlugins);
+    const { onRemove } = this.props;
 
     if (plugins.length === 0) {
-      return <span class={currentStyles.empty}>None added</span>;
+      return null;
     }
-
     return (
       <ul className={currentStyles.pluginList}>
         {plugins.map(p => (
@@ -75,13 +83,7 @@ export default class ExternalPlugins extends React.Component<Props, State> {
   }
 
   render() {
-    const {
-      _pluginChanged,
-      isExpanded,
-      onToggleExpanded,
-      plugins,
-      styles,
-    } = this.props;
+    const { isExpanded, onToggleExpanded, styles, plugins } = this.props;
 
     return (
       <AccordionTab
@@ -102,7 +104,7 @@ export default class ExternalPlugins extends React.Component<Props, State> {
         {this.state.modalOpen && (
           <ExternalPluginsModal
             onClose={this.handleCloseModal}
-            onPluginSelect={_pluginChanged}
+            onPluginSelect={this.handlePluginSelect}
             plugins={plugins}
           />
         )}

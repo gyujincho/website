@@ -3,48 +3,92 @@
 import { css } from "emotion";
 import CodeMirror from "./CodeMirror";
 import React from "react";
+import debounce from "lodash.debounce";
 import { colors } from "./styles";
 
 type Props = {
   className?: string,
   code: ?string,
   errorMessage: ?string,
+  fileSize: string,
   info?: ?string,
-  onChange?: (value: string) => void,
+  onChange: (value: string) => void,
   options: Object,
   placeholder?: string,
-  fileSize: string,
 };
 
-export default function CodeMirrorPanel(props: Props) {
-  const {
-    className = "",
-    errorMessage,
-    fileSize,
-    info,
-    onChange,
-    options,
-  } = props;
+type State = {
+  value: ?string,
+};
 
-  return (
-    <div className={`${styles.panel} ${className}`}>
-      <div className={styles.codeMirror}>
-        <CodeMirror
-          onChange={onChange}
-          options={{
-            ...props.options,
-            readOnly: onChange == null,
-          }}
-          placeholder={props.placeholder}
-          preserveScrollPosition={onChange == null}
-          value={props.code}
-        />
-        {options.fileSize && <div className={styles.fileSize}>{fileSize}</div>}
-      </div>
-      {info && <pre className={styles.info}>{info}</pre>}
-      {errorMessage && <pre className={styles.error}>{errorMessage}</pre>}
-    </div>
+const DEBOUNCE_DELAY = 500;
+
+export default class CodeMirrorPanel extends React.Component<Props, State> {
+  constructor(props: Props) {
+    super(props);
+    this.state = this.mapPropsToState(props);
+  }
+
+  componentWillReceiveProps(nextProps: Props) {
+    this.setState(this.mapPropsToState(nextProps));
+  }
+
+  mapPropsToState(props: Props) {
+    return {
+      value: props.code || "",
+    };
+  }
+
+  _handleChange = debounce(
+    (code: string) => this.props.onChange(code),
+    DEBOUNCE_DELAY
   );
+
+  handleChange = (code: string) => {
+    this.setState({ value: code });
+    this._handleChange(code);
+  };
+
+  render() {
+    const {
+      className = "",
+      code,
+      errorMessage,
+      fileSize,
+      info,
+      onChange,
+      options,
+      placeholder,
+    } = this.props;
+
+    let fileSizeBubble;
+
+    if (options.fileSize && fileSize !== null) {
+      fileSizeBubble = <div className={styles.fileSize}>{fileSize}</div>;
+    }
+
+    const readOnly = typeof onChange !== "function";
+
+    return (
+      <div className={`${styles.panel} ${className}`}>
+        <div className={styles.codeMirror}>
+          <CodeMirror
+            onChange={!readOnly ? this.handleChange : () => {}}
+            options={{
+              ...options,
+              readOnly,
+            }}
+            placeholder={placeholder}
+            preserveScrollPosition={readOnly}
+            value={code}
+          />
+          {fileSizeBubble}
+        </div>
+        {info && <pre className={styles.info}>{info}</pre>}
+        {errorMessage && <pre className={styles.error}>{errorMessage}</pre>}
+      </div>
+    );
+  }
 }
 
 const sharedBoxStyles = {
@@ -59,17 +103,20 @@ const sharedBoxStyles = {
 
 const styles = {
   codeMirror: css({
-    display: "block",
-    height: "100%",
-    width: "100%",
-    overflow: "auto",
-    position: "relative",
+    bottom: "0",
+    display: "flex",
+    left: "0",
+    overflow: "hidden",
+    position: "absolute",
+    right: "0",
+    top: "0",
   }),
   error: css({
     order: 2,
     backgroundColor: colors.errorBackground,
     borderTop: `1px solid ${colors.errorBorder}`,
     color: colors.errorForeground,
+    fontFamily: "monospace",
     ...sharedBoxStyles,
   }),
   info: css({
@@ -80,11 +127,11 @@ const styles = {
     ...sharedBoxStyles,
   }),
   panel: css({
-    height: "100%",
     display: "flex",
     flexDirection: "column",
     justifyContent: "stretch",
     overflow: "auto",
+    position: "relative",
   }),
   fileSize: css({
     position: "absolute",

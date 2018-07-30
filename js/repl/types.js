@@ -136,3 +136,90 @@ export type BabelPresetEnvResult = {
 };
 
 export type SidebarTabSection = "env" | "plugins" | "presets" | "settings";
+
+// ####### SANDPACK #######
+export type SandpackStatus =
+  | "initializing"
+  | "installing-dependencies"
+  | "transpiling"
+  | "evaluating"
+  | "running-tests"
+  | "idle";
+
+export type TranspilerContext = {
+  availablePlugins: Array<{ label: string, isPreLoaded: boolean }>,
+  availablePresets: Array<{ label: string, isPreLoaded: boolean }>,
+  babelVersion: string,
+};
+
+export type SandpackTranspilerContext = {
+  [transpiler: string]: Object,
+  "babel-loader": {
+    availablePlugins: Array<string>,
+    availablePresets: Array<string>,
+    babelVersion: string,
+  },
+};
+
+export type SandpackFile = {
+  code: string,
+};
+
+export type SandpackFiles = {
+  [path: string]: SandpackFile,
+};
+
+export type SandpackModule = {
+  code: string,
+  path: string,
+};
+
+export type SandpackModuleSource = {
+  fileName: string,
+  compiledCode: string,
+  sourceMap: Object | typeof undefined,
+};
+
+export type SandpackModuleError = {
+  title: string,
+  message: string,
+  path: string,
+  line: number,
+  column: number,
+};
+
+export type SandpackTranspiledModule = {
+  module: SandpackModule,
+  query: string,
+  source: SandpackModuleSource | typeof undefined,
+  assets: {
+    [name: string]: SandpackModuleSource,
+  },
+  isEntry: boolean,
+  isTestFile: boolean,
+  childModules: Array<string>,
+  /**
+   * All extra modules emitted by the loader
+   */
+  emittedAssets: Array<SandpackModuleSource>,
+  initiators: Array<string>,
+  dependencies: Array<string>,
+  asyncDependencies: Array<string>,
+  transpilationDependencies: Array<string>,
+  transpilationInitiators: Array<string>,
+};
+
+export type SandpackState = {
+  entry: string,
+  transpiledModules: {
+    [id: string]: SandpackTranspiledModule,
+  },
+};
+
+export type SandpackConsumerProps = {
+  bundlerURL?: string | typeof undefined,
+  errors: Array<SandpackModuleError>,
+  getManagerTranspilerContext: () => Promise<SandpackTranspilerContext>,
+  managerState: SandpackState,
+  managerStatus: SandpackStatus,
+};
